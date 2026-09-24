@@ -298,15 +298,28 @@ async def cmd_removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not db.is_admin(update.effective_chat.id):
         return
-    lines = [f"👑 Asosiy admin: {config.ADMIN_CHAT_ID}"]
+    lines = [
+        f"👑 Asosiy admin: `{config.ADMIN_CHAT_ID}` — "
+        f"[Chat ochish](tg://user?id={config.ADMIN_CHAT_ID})"
+    ]
     extra = db.list_extra_admins()
     if extra:
         lines.append("\nQo'shimcha adminlar:")
         for row in extra:
-            lines.append(f"• {row['chat_id']}")
+            cid = row["chat_id"]
+            lines.append(f"• `{cid}` — [Chat ochish](tg://user?id={cid})")
     else:
         lines.append("\nQo'shimcha adminlar yo'q.")
-    await update.message.reply_text("\n".join(lines))
+    lines.append(
+        "\n⚠️ Eslatma: \"Chat ochish\" linki Telegramning maxfiylik "
+        "sozlamalariga bog'liq — ba'zi foydalanuvchilarda to'g'ridan-to'g'ri "
+        "ochilmasligi mumkin."
+    )
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
