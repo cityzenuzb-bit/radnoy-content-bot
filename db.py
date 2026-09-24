@@ -107,10 +107,52 @@ def mark_published(post_id: int, telegram_message_id: int) -> None:
     ).eq("id", post_id).execute()
 
 
+def try_claim_for_publishing(post_id: int) -> bool:
+    """Ikkita admin bir xil postni deyarli bir vaqtda tasdiqlasa ham,
+    kanalga faqat BIR marta joylanishini kafolatlaydi: statusni faqat
+    hali 'sent_for_approval' bo'lsa 'published'ga o'zgartiradi (shart
+    bilan bitta UPDATE — Postgres darajasida atomik). Agar boshqa admin
+    ulgurib tasdiqlagan bo'lsa, bu yerda 0 qator o'zgaradi va False
+    qaytadi."""
+    res = (
+        get_client()
+        .table("content_bank")
+        .update({
+            "status": "published",
+            "published_at": datetime.now(timezone.utc).isoformat(),
+        })
+        .eq("id", post_id)
+        .eq("status", "sent_for_approval")
+        .execute()
+    )
+    return bool(res.data)
+
+
+def set_published_message_id(post_id: int, telegram_message_id: int) -> None:
+    get_client().table("content_bank").update(
+        {"telegram_message_id": telegram_message_id}
+    ).eq("id", post_id).execute()
+
+
 def mark_rejected(post_id: int, notes: str = "") -> None:
     get_client().table("content_bank").update(
         {"status": "rejected", "notes": notes}
     ).eq("id", post_id).execute()
+
+
+def try_claim_for_rejecting(post_id: int, notes: str = "") -> bool:
+    """approve bilan bir xil g'oya: faqat hali 'sent_for_approval' bo'lgan
+    postni rad etadi, aks holda False qaytaradi (boshqa admin allaqachon
+    hal qilgan)."""
+    res = (
+        get_client()
+        .table("content_bank")
+        .update({"status": "rejected", "notes": notes})
+        .eq("id", post_id)
+        .eq("status", "sent_for_approval")
+        .execute()
+    )
+    return bool(res.data)
 
 
 def update_post_text(post_id: int, new_text: str) -> None:
@@ -147,6 +189,31 @@ def remove_admin(chat_id: int) -> bool:
     """Remove a DB-added admin. Returns True if a row was deleted."""
     res = get_client().table("content_bot_admins").delete().eq("chat_id", chat_id).execute()
     return bool(res.data)
+
+
+def remove_duplicate_posts() -> int:
+    """Xuddi bir xil matnli (post_text) postlar bazada bir necha marta
+    uchrasa, faqat eng birinchisini qoldirib, qolganlarini o'chiradi.
+    O'chirilgan qatorlar sonini qaytaradi."""
+    res = (
+        get_client()
+        .table("content_bank")
+        .select("id, post_text, created_at")
+        .order("created_at", desc=False)
+        .execute()
+    )
+    seen: dict[str, int] = {}
+    duplicate_ids: list[int] = []
+    for row in res.data:
+        text = row["post_text"]
+        if text in seen:
+            duplicate_ids.append(row["id"])
+        else:
+            seen[text] = row["id"]
+
+    if duplicate_ids:
+        get_client().table("content_bank").delete().in_("id", duplicate_ids).execute()
+    return len(duplicate_ids)
 
 
 def counts() -> dict:
