@@ -55,6 +55,34 @@ def get_next_post_for_approval() -> Optional[dict]:
     return queued[0]
 
 
+def get_pending_approval_post() -> Optional[dict]:
+    """Hozir tasdiq kutayotgan post (agar bo'lsa) — eng birinchi yuborilgani."""
+    res = (
+        get_client()
+        .table("content_bank")
+        .select("*")
+        .eq("status", "sent_for_approval")
+        .order("sent_for_approval_at", desc=False)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def list_queued_topics(limit: int = 30) -> list:
+    """Navbatdagi (hali yuborilmagan) postlarning mavzu ro'yxati."""
+    res = (
+        get_client()
+        .table("content_bank")
+        .select("id, topic_tag, created_at")
+        .eq("status", "queued")
+        .order("created_at", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return res.data
+
+
 def get_post(post_id: int) -> Optional[dict]:
     res = get_client().table("content_bank").select("*").eq("id", post_id).execute()
     return res.data[0] if res.data else None

@@ -81,13 +81,18 @@ def approval_keyboard(post_id: int) -> InlineKeyboardMarkup:
 
 
 async def send_draft_for_approval(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Scheduled job: pick next queued post and DM it to all admins."""
+    """Tasdiq kutayotgan post bor bo'lsa o'shani qayta yuboradi (mavzu
+    almashib ketmasligi uchun), aks holda navbatdagi keyingi postni oladi."""
     admin_ids = db.get_all_admin_chat_ids()
     if not admin_ids:
         logger.warning("Hech qanday admin sozlanmagan, post yuborilmadi.")
         return
 
-    post = db.get_next_post_for_approval()
+    post = db.get_pending_approval_post()
+    is_resend = post is not None
+    if not post:
+        post = db.get_next_post_for_approval()
+
     if not post:
         for admin_id in admin_ids:
             try:
@@ -99,16 +104,20 @@ async def send_draft_for_approval(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.exception("Adminga xabar yuborib bo'lmadi: %s", admin_id)
         return
 
-    db.mark_sent_for_approval(post["id"])
+    if not is_resend:
+        db.mark_sent_for_approval(post["id"])
+
     preview = build_full_text(post["post_text"])
+    header = (
+        f"🔁 Hali tasdiqlanmagan post (mavzu: {post['topic_tag']})\n\n"
+        if is_resend
+        else f"🆕 Yangi post tasdiq kutmoqda (mavzu: {post['topic_tag']})\n\n"
+    )
     for admin_id in admin_ids:
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
-                text=(
-                    f"🆕 Yangi post tasdiq kutmoqda (mavzu: {post['topic_tag']})\n\n"
-                    f"{preview}"
-                ),
+                text=f"{header}{preview}",
                 reply_markup=approval_keyboard(post["id"]),
             )
         except Exception:
@@ -214,9 +223,27 @@ async def cmd_postnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await send_draft_for_approval(context)
 
 
+async def cmd_mavzular(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Navbatdagi (hali yuborilmagan) postlar ro'yxatini ko'rsatadi — joriy
+    tasdiq kutayotgan postga tegmaydi."""
+    if not db.is_admin(update.effective_chat.id):
+        return
+    topics = db.list_queued_topics()
+    if not topics:
+        await update.message.reply_text("📋 Navbatda boshqa post yo'q.")
+        return
+    lines = ["📋 Navbatdagi mavzular (tasdiqqa yuborilmagan):"]
+    for t in topics:
+        lines.append(f"#{t['id']} — {t['topic_tag']}")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    if not db.is_admin(chat_id):
+    if str(chat_id) != str(config.ADMIN_CHAT_ID):
+        await update.message.reply_text(
+            "Faqat asosiy admin (creator) yangi admin qo'sha oladi."
+        )
         return
     if not context.args:
         await update.message.reply_text("Foydalanish: /addadmin <chat_id>")
@@ -243,7 +270,10 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def cmd_removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    if not db.is_admin(chat_id):
+    if str(chat_id) != str(config.ADMIN_CHAT_ID):
+        await update.message.reply_text(
+            "Faqat asosiy admin (creator) boshqa adminlarni o'chira oladi."
+        )
         return
     if not context.args:
         await update.message.reply_text("Foydalanish: /removeadmin <chat_id>")
@@ -255,7 +285,7 @@ async def cmd_removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if str(target_id) == str(config.ADMIN_CHAT_ID):
-        await update.message.reply_text("Asosiy adminni o'chirib bo'lmaydi.")
+        await update.message.reply_text("Asosiy adminni (creator) o'chirib bo'lmaydi.")
         return
 
     removed = db.remove_admin(target_id)
@@ -279,6 +309,35 @@ async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("\n".join(lines))
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not db.is_admin(update.effective_chat.id):
+        return
+    is_creator = str(update.effective_chat.id) == str(config.ADMIN_CHAT_ID)
+    lines = [
+        "🤖 Radnoy Content Bot — buyruqlar ro'yxati:\n",
+        "/start — botni ishga tushirish, chat ID'ingizni ko'rsatadi.",
+        "/queue — kontent-bank statistikasi (navbatda, tasdiq kutmoqda, "
+        "rad etilgan, joylangan postlar soni).",
+        "/postnow — hozir tasdiq kutayotgan post bo'lsa o'shani qayta ko'rsatadi, "
+        "bo'lmasa navbatdagi keyingi postni yuboradi.",
+        "/mavzular — navbatda turgan (hali yuborilmagan) barcha postlarning "
+        "mavzularini ro'yxat qilib ko'rsatadi, joriy tasdiq jarayoniga tegmaydi.",
+        "/admins — hozirgi barcha adminlar ro'yxatini ko'rsatadi.",
+        "/help — shu buyruqlar ro'yxatini qayta ko'rsatadi.",
+        "\nHar bir post ostidagi tugmalar:",
+        "✅ Tasdiqlash — postni kanalga joylaydi.",
+        "❌ Rad etish — postni bekor qiladi (kanalga joylanmaydi).",
+        "✏️ Tahrirlash — postning matnini yozib tuzatish imkonini beradi.",
+    ]
+    if is_creator:
+        lines.append(
+            "\n👑 Faqat sizga (asosiy admin/creator) tegishli buyruqlar:"
+        )
+        lines.append("/addadmin <chat_id> — yangi adminga dostup beradi.")
+        lines.append("/removeadmin <chat_id> — adminni dostupdan mahrum qiladi.")
+    await update.message.reply_text("\n".join(lines))
+
+
 def parse_post_times() -> list[dtime]:
     times = []
     for part in config.POST_TIMES.split(","):
@@ -298,9 +357,11 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("postnow", cmd_postnow))
+    app.add_handler(CommandHandler("mavzular", cmd_mavzular))
     app.add_handler(CommandHandler("addadmin", cmd_addadmin))
     app.add_handler(CommandHandler("removeadmin", cmd_removeadmin))
     app.add_handler(CommandHandler("admins", cmd_admins))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(handle_approval_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_message))
 
