@@ -85,6 +85,42 @@ def mark_rejected(post_id: int, notes: str = "") -> None:
     ).eq("id", post_id).execute()
 
 
+def update_post_text(post_id: int, new_text: str) -> None:
+    get_client().table("content_bank").update(
+        {"post_text": new_text}
+    ).eq("id", post_id).execute()
+
+
+def list_extra_admins() -> list:
+    """Admin chat_ids stored in the DB (besides the bootstrap ADMIN_CHAT_ID)."""
+    res = get_client().table("content_bot_admins").select("*").order("added_at").execute()
+    return res.data
+
+
+def get_all_admin_chat_ids() -> set:
+    """Bootstrap admin (config.ADMIN_CHAT_ID) + all DB-added admins."""
+    ids = {str(config.ADMIN_CHAT_ID)}
+    for row in list_extra_admins():
+        ids.add(str(row["chat_id"]))
+    return ids
+
+
+def is_admin(chat_id) -> bool:
+    return str(chat_id) in get_all_admin_chat_ids()
+
+
+def add_admin(chat_id: int, added_by: int) -> None:
+    get_client().table("content_bot_admins").upsert(
+        {"chat_id": chat_id, "added_by": added_by}
+    ).execute()
+
+
+def remove_admin(chat_id: int) -> bool:
+    """Remove a DB-added admin. Returns True if a row was deleted."""
+    res = get_client().table("content_bot_admins").delete().eq("chat_id", chat_id).execute()
+    return bool(res.data)
+
+
 def counts() -> dict:
     result = {}
     for status in ("queued", "sent_for_approval", "approved", "rejected", "published"):
