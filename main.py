@@ -91,6 +91,9 @@ async def send_draft_for_approval(context: ContextTypes.DEFAULT_TYPE) -> None:
     post = db.get_pending_approval_post()
     is_resend = post is not None
     if not post:
+        removed = db.remove_duplicate_posts()
+        if removed:
+            logger.info("Bazadan %s ta bir xil (dublikat) post o'chirildi.", removed)
         post = db.get_next_post_for_approval()
 
     if not post:
@@ -162,12 +165,35 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if action == "approve":
+        # Ikkita admin bir vaqtda tasdiqlasa ham kanalga faqat bitta marta
+        # joylanishini kafolatlash uchun avval postni "band qilamiz" —
+        # faqat shu chaqiruv statusni sent_for_approval'dan published'ga
+        # o'zgartira olgan bo'lsagina kanalga yuboramiz.
+        claimed = db.try_claim_for_publishing(post_id)
+        if not claimed:
+            fresh = db.get_post(post_id) or post
+            if fresh["status"] == "published":
+                await query.edit_message_text(
+                    "ℹ️ Bu postni boshqa admin sizdan oldinroq tasdiqlab, "
+                    f"kanalga allaqachon joylagan:\n\n{build_full_text(fresh['post_text'])}"
+                )
+            else:
+                await query.edit_message_text(
+                    "ℹ️ Bu post boshqa admin tomonidan allaqachon ko'rib chiqilgan."
+                )
+            return
+
         full_text = build_full_text(post["post_text"])
         sent = await context.bot.send_message(chat_id=config.CHANNEL_ID, text=full_text)
-        db.mark_published(post_id, sent.message_id)
+        db.set_published_message_id(post_id, sent.message_id)
         await query.edit_message_text(f"✅ Kanalga joylandi:\n\n{full_text}")
     elif action == "reject":
-        db.mark_rejected(post_id, notes="Admin tomonidan rad etildi")
+        claimed = db.try_claim_for_rejecting(post_id, notes="Admin tomonidan rad etildi")
+        if not claimed:
+            await query.edit_message_text(
+                "ℹ️ Bu post boshqa admin tomonidan allaqachon ko'rib chiqilgan."
+            )
+            return
         await query.edit_message_text(f"❌ Rad etildi:\n\n{build_full_text(post['post_text'])}")
 
 
