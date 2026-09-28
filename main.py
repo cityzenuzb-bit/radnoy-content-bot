@@ -38,6 +38,9 @@ TZ = ZoneInfo(config.TIMEZONE)
 # chat_id -> post_id ning tahrirlanishini kutayotgan holati (xotirada saqlanadi)
 pending_edits: dict[int, int] = {}
 
+# chat_id -> yangi post/rubrika kiritishni kutayotgan adminlar (xotirada saqlanadi)
+pending_new_posts: set[int] = set()
+
 
 class _HealthCheckHandler(BaseHTTPRequestHandler):
     """Render 'web service' turi portga ulanishni talab qiladi. Bot faqat
@@ -127,12 +130,53 @@ async def send_draft_for_approval(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("Adminga post yuborib bo'lmadi: %s", admin_id)
 
 
+def rubrikalar_keyboard(rubrikas: list) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"📁 {r['topic_tag']} ({r['count']})", callback_data=f"rubrika:{r['topic_tag']}"
+            )
+        ]
+        for r in rubrikas
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
 async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = update.effective_chat.id
 
     if not db.is_admin(chat_id):
         await query.answer("Sizda bu amalni bajarish huquqi yo'q.", show_alert=True)
+        return
+
+    if query.data.startswith("rubrika:"):
+        await query.answer()
+        topic_tag = query.data.split(":", 1)[1]
+        posts = db.list_queued_by_rubrika(topic_tag)
+        if not posts:
+            await query.edit_message_text(f"📁 «{topic_tag}» rubrikasida hozircha post yo'q.")
+            return
+        lines = [f"📁 «{topic_tag}» rubrikasidagi navbatdagi postlar:\n"]
+        for p in posts:
+            preview = p["post_text"].strip().splitlines()[0][:60]
+            lines.append(f"#{p['id']} — {preview}")
+        back_keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Rubrikalarga qaytish", callback_data="rubrikalar_back")]]
+        )
+        await query.edit_message_text("\n".join(lines), reply_markup=back_keyboard)
+        return
+
+    if query.data == "rubrikalar_back":
+        await query.answer()
+        rubrikas = db.list_rubrikas()
+        if not rubrikas:
+            await query.edit_message_text("📁 Hozircha navbatda hech qanday rubrika yo'q.")
+            return
+        await query.edit_message_text(
+            "📁 Rubrikalar (navbatdagi postlar bo'yicha):",
+            reply_markup=rubrikalar_keyboard(rubrikas),
+        )
         return
 
     await query.answer()
@@ -149,6 +193,7 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
         if post["status"] in ("published", "rejected"):
             await query.answer("Bu postni endi tahrirlab bo'lmaydi.", show_alert=True)
             return
+        pending_new_posts.discard(chat_id)
         pending_edits[chat_id] = post_id
         await query.edit_message_text(
             f"✏️ Postning yangi matnini yozib yuboring (mavzu: {post['topic_tag']}).\n\n"
@@ -197,23 +242,48 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text(f"❌ Rad etildi:\n\n{build_full_text(post['post_text'])}")
 
 
-async def handle_edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin tahrirlash rejimida bo'lsa, keyingi oddiy xabarini yangi post matni deb qabul qiladi."""
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin qandaydir kutilayotgan holatda bo'lsa (post tahrirlash yoki yangi
+    post qo'shish), keyingi oddiy xabarini o'sha holatga mos ravishda qabul
+    qiladi."""
     chat_id = update.effective_chat.id
-    if chat_id not in pending_edits:
-        return
     if not db.is_admin(chat_id):
         return
 
-    post_id = pending_edits.pop(chat_id)
-    new_text = update.message.text
-    db.update_post_text(post_id, new_text)
+    if chat_id in pending_new_posts:
+        pending_new_posts.discard(chat_id)
+        raw = update.message.text.strip()
+        lines = raw.splitlines()
+        if len(lines) < 2 or not lines[0].strip() or not "\n".join(lines[1:]).strip():
+            await update.message.reply_text(
+                "⚠️ Format noto'g'ri edi, post qo'shilmadi. Birinchi qatorga "
+                "rubrika nomini, keyingi qatorlarga post matnini yozib, /yangipost "
+                "buyrug'ini qaytadan bering."
+            )
+            return
+        topic_tag = lines[0].strip()
+        post_text = "\n".join(lines[1:]).strip()
+        new_post = db.add_post(topic_tag, post_text)
+        if not new_post:
+            await update.message.reply_text("❌ Postni bazaga qo'shib bo'lmadi, qaytadan urinib ko'ring.")
+            return
+        preview = build_full_text(post_text)
+        await update.message.reply_text(
+            f"✅ Yangi post navbatga qo'shildi (rubrika: {topic_tag}, #{new_post['id']}):\n\n{preview}"
+        )
+        return
 
-    preview = build_full_text(new_text)
-    await update.message.reply_text(
-        f"✅ Post yangilandi. Tasdiqlash uchun ko'rib chiqing:\n\n{preview}",
-        reply_markup=approval_keyboard(post_id),
-    )
+    if chat_id in pending_edits:
+        post_id = pending_edits.pop(chat_id)
+        new_text = update.message.text
+        db.update_post_text(post_id, new_text)
+
+        preview = build_full_text(new_text)
+        await update.message.reply_text(
+            f"✅ Post yangilandi. Tasdiqlash uchun ko'rib chiqing:\n\n{preview}",
+            reply_markup=approval_keyboard(post_id),
+        )
+        return
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -262,6 +332,35 @@ async def cmd_mavzular(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for t in topics:
         lines.append(f"#{t['id']} — {t['topic_tag']}")
     await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_yangipost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin yangi content g'oyasini/postini qo'lda navbatga qo'shishni boshlaydi."""
+    chat_id = update.effective_chat.id
+    if not db.is_admin(chat_id):
+        return
+    pending_edits.pop(chat_id, None)
+    pending_new_posts.add(chat_id)
+    await update.message.reply_text(
+        "✍️ Yangi post qo'shamiz. Endi bitta xabar sifatida yuboring:\n\n"
+        "1-qator: rubrika nomi (masalan: motivatsiya)\n"
+        "2-qatordan boshlab: post matni\n\n"
+        "Eslatma: pastki imzo qatori avtomatik qo'shiladi, uni yozish shart emas."
+    )
+
+
+async def cmd_rubrikalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Navbatdagi postlarni rubrika (mavzu guruhi) bo'yicha ko'rsatadi."""
+    if not db.is_admin(update.effective_chat.id):
+        return
+    rubrikas = db.list_rubrikas()
+    if not rubrikas:
+        await update.message.reply_text("📁 Hozircha navbatda hech qanday rubrika yo'q.")
+        return
+    await update.message.reply_text(
+        "📁 Rubrikalar (navbatdagi postlar bo'yicha):",
+        reply_markup=rubrikalar_keyboard(rubrikas),
+    )
 
 
 async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -361,6 +460,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "bo'lmasa navbatdagi keyingi postni yuboradi.",
         "/mavzular — navbatda turgan (hali yuborilmagan) barcha postlarning "
         "mavzularini ro'yxat qilib ko'rsatadi, joriy tasdiq jarayoniga tegmaydi.",
+        "/rubrikalar — navbatdagi postlarni rubrika (mavzu guruhi) bo'yicha "
+        "ko'rsatadi, tugmani bosib o'sha rubrikadagi postlar ro'yxatini ochish mumkin.",
+        "/yangipost — yangi content g'oyasi/postini qo'lda navbatga qo'shish "
+        "(rubrika nomi va matnni so'raydi).",
         "/admins — hozirgi barcha adminlar ro'yxatini ko'rsatadi.",
         "/help — shu buyruqlar ro'yxatini qayta ko'rsatadi.",
         "\nHar bir post ostidagi tugmalar:",
@@ -397,12 +500,14 @@ def main() -> None:
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("postnow", cmd_postnow))
     app.add_handler(CommandHandler("mavzular", cmd_mavzular))
+    app.add_handler(CommandHandler("rubrikalar", cmd_rubrikalar))
+    app.add_handler(CommandHandler("yangipost", cmd_yangipost))
     app.add_handler(CommandHandler("addadmin", cmd_addadmin))
     app.add_handler(CommandHandler("removeadmin", cmd_removeadmin))
     app.add_handler(CommandHandler("admins", cmd_admins))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(handle_approval_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     for t in parse_post_times():
         app.job_queue.run_daily(send_draft_for_approval, time=t)
