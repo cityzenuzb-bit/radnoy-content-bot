@@ -88,6 +88,55 @@ def get_post(post_id: int) -> Optional[dict]:
     return res.data[0] if res.data else None
 
 
+def add_post(topic_tag: str, post_text: str) -> Optional[dict]:
+    """Admin tomonidan yangi post/g'oya qo'shadi. Yangi post 'queued' holatida
+    navbatga qo'shiladi (galdagi joyi navbat oxiri, chunki created_at hozirgi
+    vaqt bo'ladi)."""
+    res = (
+        get_client()
+        .table("content_bank")
+        .insert({"topic_tag": topic_tag, "post_text": post_text, "status": "queued"})
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def list_rubrikas() -> list:
+    """Navbatda turgan (queued) postlarni rubrika (topic_tag) bo'yicha
+    guruhlab, har biridagi postlar sonini qaytaradi."""
+    res = (
+        get_client()
+        .table("content_bank")
+        .select("topic_tag")
+        .eq("status", "queued")
+        .execute()
+    )
+    counts: dict[str, int] = {}
+    for row in res.data:
+        tag = row["topic_tag"]
+        counts[tag] = counts.get(tag, 0) + 1
+    return [
+        {"topic_tag": tag, "count": count}
+        for tag, count in sorted(counts.items(), key=lambda x: x[0])
+    ]
+
+
+def list_queued_by_rubrika(topic_tag: str, limit: int = 30) -> list:
+    """Berilgan rubrikaga (topic_tag) tegishli, hali navbatda turgan
+    postlarni qaytaradi."""
+    res = (
+        get_client()
+        .table("content_bank")
+        .select("id, topic_tag, post_text, created_at")
+        .eq("status", "queued")
+        .eq("topic_tag", topic_tag)
+        .order("created_at", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return res.data
+
+
 def mark_sent_for_approval(post_id: int) -> None:
     get_client().table("content_bank").update(
         {
